@@ -1,13 +1,25 @@
 use anyhow::{Context, Result};
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use oxc_resolver::{ResolveOptions, Resolver, EnforceExtension, TsconfigOptions, TsconfigReferences};
 use petgraph::{algo, Graph};
 use regex::Regex;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     fs,
     path::{Path, PathBuf},
+    time::Instant,
 };
+
+#[derive(Clone, Debug, ValueEnum)]
+enum OutputFormat {
+    /// Human-readable text output (default)
+    Text,
+    /// JSON format for programmatic use
+    Json,
+    /// GraphViz DOT format for visualization
+    Dot,
+}
 
 #[derive(Parser, Debug)]
 #[command(name = "rustyring")]
@@ -21,12 +33,20 @@ struct Args {
     #[arg(short, long, default_value = ".")]
     root: PathBuf,
 
-    /// Show verbose output
+    /// Show verbose output (only for text format)
     #[arg(short, long)]
     verbose: bool,
+
+    /// Output format
+    #[arg(short, long, value_enum, default_value = "text")]
+    output: OutputFormat,
+
+    /// Output file (defaults to stdout)
+    #[arg(long)]
+    output_file: Option<PathBuf>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct ImportInfo {
     from: PathBuf,
     to: String,
@@ -34,9 +54,17 @@ struct ImportInfo {
     line_number: usize,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct CircularDependency {
     cycle: Vec<PathBuf>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct AnalysisResult {
+    files_processed: usize,
+    imports_found: usize,
+    circular_dependencies: Vec<CircularDependency>,
+    imports: Vec<ImportInfo>,
 }
 
 struct DependencyAnalyzer {
@@ -281,55 +309,163 @@ impl DependencyAnalyzer {
         circular_deps
     }
 
-    fn print_results(&self, circular_deps: &[CircularDependency], verbose: bool) {
-        if circular_deps.is_empty() {
-            println!("✅ No circular dependencies found!");
-            return;
+    fn get_analysis_result(&self, circular_deps: &[CircularDependency]) -> AnalysisResult {
+        AnalysisResult {
+            files_processed: self.visited_files.len(),
+            imports_found: self.imports.len(),
+            circular_dependencies: circular_deps.to_vec(),
+            imports: self.imports.clone(),
         }
+    }
+}
 
-        println!("🔴 Found {} circular dependencies:", circular_deps.len());
-        println!();
+fn print_text_results(result: &AnalysisResult, verbose: bool) {
+    println!("📊 Processed {} files", result.files_processed);
+    println!("🔗 Found {} imports", result.imports_found);
 
-        for (i, circular_dep) in circular_deps.iter().enumerate() {
-            println!("Circular Dependency #{}:", i + 1);
-            
-            for (j, file) in circular_dep.cycle.iter().enumerate() {
-                let next_file = if j == circular_dep.cycle.len() - 1 {
-                    &circular_dep.cycle[0] // Point back to first file to complete the circle
-                } else {
-                    &circular_dep.cycle[j + 1]
-                };
+    if result.circular_dependencies.is_empty() {
+        println!("✅ No circular dependencies found!");
+        return;
+    }
 
-                if j == circular_dep.cycle.len() - 1 {
-                    println!("  └─ {} → {} (completes circle)", file.display(), next_file.display());
-                } else {
-                    println!("  ├─ {} → {}", file.display(), next_file.display());
-                }
+    println!("🔴 Found {} circular dependencies:", result.circular_dependencies.len());
+    println!();
+
+    for (i, circular_dep) in result.circular_dependencies.iter().enumerate() {
+        println!("Circular Dependency #{}:", i + 1);
+        
+        for (j, file) in circular_dep.cycle.iter().enumerate() {
+            let next_file = if j == circular_dep.cycle.len() - 1 {
+                &circular_dep.cycle[0] // Point back to first file to complete the circle
+            } else {
+                &circular_dep.cycle[j + 1]
+            };
+
+            if j == circular_dep.cycle.len() - 1 {
+                println!("  └─ {} → {} (completes circle)", file.display(), next_file.display());
+            } else {
+                println!("  ├─ {} → {}", file.display(), next_file.display());
             }
-            
-            if verbose {
-                println!("  Dependencies involved:");
-                for file in &circular_dep.cycle {
-                    let file_imports: Vec<&ImportInfo> = self.imports.iter()
-                        .filter(|import| import.from == *file && 
-                                circular_dep.cycle.iter().any(|f| Some(f) == import.resolved_to.as_ref()))
-                        .collect();
-                    
-                    if !file_imports.is_empty() {
-                        println!("    From {}:", file.display());
-                        for import in file_imports {
-                            if let Some(resolved) = &import.resolved_to {
-                                println!("      - Line {}: {} → {}", 
-                                    import.line_number, import.to, resolved.display());
-                            }
+        }
+        
+        if verbose {
+            println!("  Dependencies involved:");
+            for file in &circular_dep.cycle {
+                let file_imports: Vec<&ImportInfo> = result.imports.iter()
+                    .filter(|import| import.from == *file && 
+                            circular_dep.cycle.iter().any(|f| Some(f) == import.resolved_to.as_ref()))
+                    .collect();
+                
+                if !file_imports.is_empty() {
+                    println!("    From {}:", file.display());
+                    for import in file_imports {
+                        if let Some(resolved) = &import.resolved_to {
+                            println!("      - Line {}: {} → {}", 
+                                import.line_number, import.to, resolved.display());
                         }
                     }
                 }
             }
-            
-            println!();
+        }
+        
+        println!();
+    }
+}
+
+fn generate_dot_output(result: &AnalysisResult) -> String {
+    let mut dot = String::new();
+    dot.push_str("digraph circular_dependencies {\n");
+    dot.push_str("  rankdir=LR;\n");
+    dot.push_str("  node [shape=box, style=rounded, color=red, fontcolor=red];\n");
+    dot.push_str("  edge [fontsize=10, color=red, penwidth=2];\n\n");
+
+    if result.circular_dependencies.is_empty() {
+        dot.push_str("  no_cycles [label=\"No Circular Dependencies Found\", shape=ellipse, color=green, fontcolor=green];\n");
+        dot.push_str("}\n");
+        return dot;
+    }
+
+    // Collect all files involved in circular dependencies
+    let mut circular_files = HashSet::new();
+    for cycle in &result.circular_dependencies {
+        for file in &cycle.cycle {
+            circular_files.insert(file);
         }
     }
+
+    // Create a mapping of file paths to node IDs (only for circular files)
+    let mut file_to_id = HashMap::new();
+    let mut node_counter = 0;
+
+    // Create nodes only for files involved in circular dependencies
+    for file in &circular_files {
+        let id = format!("n{}", node_counter);
+        file_to_id.insert((*file).clone(), id.clone());
+        node_counter += 1;
+
+        let file_name = file.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("unknown");
+        let parent_dir = file.parent()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            .unwrap_or("");
+
+        let label = if parent_dir.is_empty() {
+            file_name.to_string()
+        } else {
+            format!("{}/{}", parent_dir, file_name)
+        };
+
+        dot.push_str(&format!("  {} [label=\"{}\"];\n", id, label));
+    }
+
+    dot.push_str("\n");
+
+    // Create edges only between circular files
+    for import in &result.imports {
+        if let Some(ref resolved) = import.resolved_to {
+            // Only include edges where both files are in circular dependencies
+            if circular_files.contains(&import.from) && circular_files.contains(resolved) {
+                if let (Some(from_id), Some(to_id)) = (file_to_id.get(&import.from), file_to_id.get(resolved)) {
+                    dot.push_str(&format!("  {} -> {};\n", from_id, to_id));
+                }
+            }
+        }
+    }
+
+    // Group circular dependencies visually
+    for (cycle_idx, cycle) in result.circular_dependencies.iter().enumerate() {
+        dot.push_str(&format!("\n  subgraph cluster_cycle_{} {{\n", cycle_idx));
+        dot.push_str(&format!("    label=\"Circular Dependency #{}\";\n", cycle_idx + 1));
+        dot.push_str("    style=dashed;\n");
+        dot.push_str("    color=red;\n");
+        
+        for file in &cycle.cycle {
+            if let Some(node_id) = file_to_id.get(file) {
+                dot.push_str(&format!("    {};\n", node_id));
+            }
+        }
+        
+        dot.push_str("  }\n");
+    }
+
+    dot.push_str("}\n");
+    dot
+}
+
+fn write_output(content: &str, output_file: Option<&PathBuf>) -> Result<()> {
+    match output_file {
+        Some(path) => {
+            fs::write(path, content)
+                .with_context(|| format!("Failed to write to file: {}", path.display()))?;
+            eprintln!("Output written to: {}", path.display());
+        }
+        None => {
+            print!("{}", content);
+        }
+    }
+    Ok(())
 }
 
 fn main() -> Result<()> {
@@ -340,26 +476,57 @@ fn main() -> Result<()> {
         std::process::exit(1);
     }
 
-    println!("🔍 Analyzing dependencies...");
+    let start_time = Instant::now();
+
+    if !matches!(args.output, OutputFormat::Json | OutputFormat::Dot) {
+        println!("🔍 Analyzing dependencies...");
+    }
 
     let mut analyzer = DependencyAnalyzer::new(&args.root)?;
     
     // Build dependency graph
     analyzer.build_dependency_graph(&args.entry_files)?;
     
-    println!("📊 Processed {} files", analyzer.visited_files.len());
-    println!("🔗 Found {} imports", analyzer.imports.len());
-
     // Find circular dependencies
     let circular_deps = analyzer.find_circular_dependencies();
+    let result = analyzer.get_analysis_result(&circular_deps);
     
-    // Print results
-    analyzer.print_results(&circular_deps, args.verbose);
+    let elapsed = start_time.elapsed();
+    
+    // Generate output based on format
+    match args.output {
+        OutputFormat::Text => {
+            print_text_results(&result, args.verbose);
+            print_timing_info(elapsed);
+        }
+        OutputFormat::Json => {
+            let json = serde_json::to_string_pretty(&result)
+                .context("Failed to serialize result to JSON")?;
+            write_output(&json, args.output_file.as_ref())?;
+            eprintln!("⏱️  Analysis completed in {:.2?}", elapsed);
+        }
+        OutputFormat::Dot => {
+            let dot = generate_dot_output(&result);
+            write_output(&dot, args.output_file.as_ref())?;
+            eprintln!("⏱️  Analysis completed in {:.2?}", elapsed);
+        }
+    }
 
-    // Exit with error code if circular dependencies found
-    if !circular_deps.is_empty() {
+    // Exit with error code if circular dependencies found (except for output formats)
+    if !circular_deps.is_empty() && matches!(args.output, OutputFormat::Text) {
         std::process::exit(1);
     }
 
     Ok(())
+}
+
+fn print_timing_info(elapsed: std::time::Duration) {
+    let total_ms = elapsed.as_millis();
+    
+    if total_ms < 1000 {
+        println!("⏱️  Analysis completed in {}ms", total_ms);
+    } else {
+        let seconds = elapsed.as_secs_f64();
+        println!("⏱️  Analysis completed in {:.2}s", seconds);
+    }
 }

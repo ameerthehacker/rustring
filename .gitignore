@@ -1,3 +1,7 @@
 /target
 
+# macos
 .DS_Store
+
+# binary
+rustyring

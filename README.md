@@ -51,6 +51,23 @@ cd rustyring
 cargo build --release
 ```
 
+The binary will be available at `target/release/rustyring`.
+
+### Make it globally available
+
+To use `rustyring` from anywhere:
+
+```bash
+# Option 1: Copy to a directory in your PATH
+cp target/release/rustyring /usr/local/bin/
+
+# Option 2: Create a symlink
+ln -s $(pwd)/target/release/rustyring /usr/local/bin/rustyring
+
+# Option 3: Install with cargo (if published to crates.io)
+cargo install rustyring
+```
+
 ## Usage
 
 ### Basic Usage
@@ -58,7 +75,7 @@ cargo build --release
 Analyze a single entry file:
 
 ```bash
-cargo run -- src/main.js
+rustyring src/main.js
 ```
 
 ### Multiple Entry Files
@@ -66,7 +83,7 @@ cargo run -- src/main.js
 Analyze multiple entry files:
 
 ```bash
-cargo run -- src/main.js src/app.js src/utils.js
+rustyring src/main.js src/app.js src/utils.js
 ```
 
 ### Verbose Output
@@ -74,7 +91,7 @@ cargo run -- src/main.js src/app.js src/utils.js
 Get detailed information about dependencies and line numbers:
 
 ```bash
-cargo run -- src/main.js --verbose
+rustyring src/main.js --verbose
 ```
 
 ### Specify Project Root
@@ -82,7 +99,41 @@ cargo run -- src/main.js --verbose
 Set a custom project root directory:
 
 ```bash
-cargo run -- src/main.js --root /path/to/project
+rustyring src/main.js --root /path/to/project
+```
+
+### Output Formats
+
+RustyRing supports multiple output formats:
+
+#### Human-Readable Text (Default)
+```bash
+rustyring src/main.js --output text --verbose
+```
+
+#### JSON Format
+```bash
+rustyring src/main.js --output json --output-file results.json
+```
+
+#### GraphViz DOT Format for Visualization
+```bash
+rustyring src/main.js --output dot --output-file deps.dot
+```
+
+The GraphViz output shows **only files involved in circular dependencies** for clean, focused visualization:
+- Files in circular dependencies are highlighted in red
+- Each circular dependency is grouped in a dashed box
+- Clean "No Circular Dependencies Found" message when project is clean
+
+Then visualize with:
+```bash
+# Generate SVG (requires graphviz: brew install graphviz)
+dot -Tsvg deps.dot -o deps.svg
+
+# Or use online tools:
+# - https://viz-js.com/
+# - https://dreampuf.github.io/GraphvizOnline/
 ```
 
 ## Example Output
@@ -94,6 +145,7 @@ cargo run -- src/main.js --root /path/to/project
 📊 Processed 10 files
 🔗 Found 25 imports
 ✅ No circular dependencies found!
+⏱️  Analysis completed in 45ms
 ```
 
 ### Circular Dependencies Found
@@ -105,18 +157,20 @@ cargo run -- src/main.js --root /path/to/project
 🔴 Found 2 circular dependencies:
 
 Circular Dependency #1:
-  ├─ src/utils.js →
-  └─ src/helpers.js → src/utils.js (circular)
+  ├─ src/utils.js → src/helpers.js
+  └─ src/helpers.js → src/utils.js (completes circle)
 
 Circular Dependency #2:
-  ├─ src/components/Button.jsx →
-  └─ src/components/Modal.jsx → src/components/Button.jsx (circular)
+  ├─ src/components/Button.jsx → src/components/Modal.jsx
+  └─ src/components/Modal.jsx → src/components/Button.jsx (completes circle)
+
+⏱️  Analysis completed in 32ms
 ```
 
 ### Verbose Output
 
 ```bash
-cargo run -- src/main.js --verbose
+rustyring src/main.js --verbose
 ```
 
 ```
@@ -126,13 +180,15 @@ cargo run -- src/main.js --verbose
 🔴 Found 1 circular dependencies:
 
 Circular Dependency #1:
-  ├─ src/a.js →
-  └─ src/b.js → src/a.js (circular)
+  ├─ src/a.js → src/b.js
+  └─ src/b.js → src/a.js (completes circle)
   Dependencies involved:
     From src/a.js:
       - Line 1: ./b.js → src/b.js
     From src/b.js:
       - Line 1: ./a.js → src/a.js
+
+⏱️  Analysis completed in 25ms
 ```
 
 ## Exit Codes

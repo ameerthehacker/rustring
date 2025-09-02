@@ -319,7 +319,7 @@ impl DependencyAnalyzer {
     }
 }
 
-fn print_text_results(result: &AnalysisResult, verbose: bool) {
+fn print_text_results(result: &AnalysisResult, verbose: bool, project_root: &Path) {
     println!("📊 Processed {} files", result.files_processed);
     println!("🔗 Found {} imports", result.imports_found);
 
@@ -341,10 +341,13 @@ fn print_text_results(result: &AnalysisResult, verbose: bool) {
                 &circular_dep.cycle[j + 1]
             };
 
+            let current_relative = file.strip_prefix(project_root).unwrap_or(file).to_string_lossy();
+            let next_relative = next_file.strip_prefix(project_root).unwrap_or(next_file).to_string_lossy();
+
             if j == circular_dep.cycle.len() - 1 {
-                println!("  └─ {} → {} (completes circle)", file.display(), next_file.display());
+                println!("  └─ {} → {} (completes circle)", current_relative, next_relative);
             } else {
-                println!("  ├─ {} → {}", file.display(), next_file.display());
+                println!("  ├─ {} → {}", current_relative, next_relative);
             }
         }
         
@@ -357,11 +360,13 @@ fn print_text_results(result: &AnalysisResult, verbose: bool) {
                     .collect();
                 
                 if !file_imports.is_empty() {
-                    println!("    From {}:", file.display());
+                    let file_relative = file.strip_prefix(project_root).unwrap_or(file).to_string_lossy();
+                    println!("    From {}:", file_relative);
                     for import in file_imports {
                         if let Some(resolved) = &import.resolved_to {
+                            let resolved_relative = resolved.strip_prefix(project_root).unwrap_or(resolved).to_string_lossy();
                             println!("      - Line {}: {} → {}", 
-                                import.line_number, import.to, resolved.display());
+                                import.line_number, import.to, resolved_relative);
                         }
                     }
                 }
@@ -372,7 +377,7 @@ fn print_text_results(result: &AnalysisResult, verbose: bool) {
     }
 }
 
-fn generate_dot_output(result: &AnalysisResult) -> String {
+fn generate_dot_output(result: &AnalysisResult, project_root: &Path) -> String {
     let mut dot = String::new();
     dot.push_str("digraph circular_dependencies {\n");
     dot.push_str("  rankdir=LR;\n");
@@ -403,19 +408,9 @@ fn generate_dot_output(result: &AnalysisResult) -> String {
         file_to_id.insert((*file).clone(), id.clone());
         node_counter += 1;
 
-        let file_name = file.file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("unknown");
-        let parent_dir = file.parent()
-            .and_then(|p| p.file_name())
-            .and_then(|n| n.to_str())
-            .unwrap_or("");
-
-        let label = if parent_dir.is_empty() {
-            file_name.to_string()
-        } else {
-            format!("{}/{}", parent_dir, file_name)
-        };
+        // Use relative path from project root
+        let relative_path = file.strip_prefix(project_root).unwrap_or(file);
+        let label = relative_path.to_string_lossy().to_string();
 
         dot.push_str(&format!("  {} [label=\"{}\"];\n", id, label));
     }
@@ -496,7 +491,7 @@ fn main() -> Result<()> {
     // Generate output based on format
     match args.output {
         OutputFormat::Text => {
-            print_text_results(&result, args.verbose);
+            print_text_results(&result, args.verbose, &args.root);
             print_timing_info(elapsed);
         }
         OutputFormat::Json => {
@@ -506,7 +501,7 @@ fn main() -> Result<()> {
             eprintln!("⏱️  Analysis completed in {:.2?}", elapsed);
         }
         OutputFormat::Dot => {
-            let dot = generate_dot_output(&result);
+            let dot = generate_dot_output(&result, &args.root);
             write_output(&dot, args.output_file.as_ref())?;
             eprintln!("⏱️  Analysis completed in {:.2?}", elapsed);
         }
